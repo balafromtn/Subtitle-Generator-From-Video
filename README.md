@@ -89,4 +89,12 @@ node server.js
 4. Click **Generate Subtitles** and wait for the file to process.
 5. Click **Download Subtitles (.srt)** once processing is complete. If the AI transliteration fails, the UI will warn you and provide a fallback native-script file.
 
-```
+## 🤝 Contributing
+I am always looking to learn and improve, so contributions are incredibly welcome! If you have ideas for new features, found a bug, or just want to make the code cleaner, I would be absolutely thrilled to see your input. 
+
+Feel free to fork the repository, make your changes, and submit a Pull Request. Let's make this project even better together!
+
+## ⭐️ Show Your Support
+If this project was useful to you, saved you some time, or if you just found the code interesting, I would be incredibly grateful if you could give it a **Star** ⭐️ on GitHub. 
+
+It is a small gesture, but it truly means a lot to me and helps other developers discover the tool. Thank you for your support!
