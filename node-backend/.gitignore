@@ -11,5 +11,5 @@ python-ai-engine/temp_processing/
 *.pyc
 
 # Environment Variables
-.env
+python-ai-engine/.env
 .venv
