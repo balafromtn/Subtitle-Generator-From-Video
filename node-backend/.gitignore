@@ -1,19 +1,19 @@
 # Node
+node_modules/
 node-backend/node_modules/
 node-backend/uploads/
 node-backend/npm-debug.log
-node_modules/
-
 
 # Python
+venv/
+.venv/
 python-ai-engine/venv/
 python-ai-engine/.venv/
-python-ai-engine/__pycache__/
 python-ai-engine/temp_processing/
+
+__pycache__/
 *.pyc
 
 # Environment Variables
 .env
 *.env
-venv/
-.venv/
