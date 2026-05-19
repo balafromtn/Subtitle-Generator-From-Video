@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Tanglish Transcriber</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="container">
+        <h1>AI Video Transcriber</h1>
+        <p class="subtitle">Extract audio and generate highly accurate subtitles instantly.</p>
+
+        <form id="uploadForm">
+            <div class="drop-zone" id="drop-zone">
+                <div id="upload-prompt">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#6B7280" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin: 0 auto;">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <polyline points="17 8 12 3 7 8"></polyline>
+                        <line x1="12" y1="3" x2="12" y2="15"></line>
+                    </svg>
+                    <p><span class="highlight">Click to upload</span> or drag and drop your video</p>
+                    <p style="font-size: 12px; margin-top: 4px;">MP4, WEBM, MKV (Max: 500MB)</p>
+                </div>
+
+                <div id="file-selected-ui">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#4F46E5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin: 0 auto;">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <polygon points="12 18 15 13 18 18 12 18"></polygon>
+                    </svg>
+                    <div id="file-name-display"></div>
+                    <button type="button" id="removeFileBtn">Remove File</button>
+                </div>
+            </div>
+            <input type="file" id="fileInput" accept="video/*">
+
+            <div class="input-group">
+                <label for="language">Subtitle Language</label>
+                <select id="language" required>
+                    <option value="tanglish">Tanglish (Romanized Tamil)</option>
+                    <option value="english">English (Translated)</option>
+                </select>
+            </div>
+
+            <button type="submit" id="submitBtn" class="btn-primary">Generate Subtitles (.srt)</button>
+
+            <div id="success-actions">
+                <button type="button" id="downloadBtn" class="btn-success">Download Subtitles (.srt)</button>
+                <button type="button" id="resetBtn" class="btn-outline">Upload Another Video</button>
+            </div>
+        </form>
+
+        <div id="status-area"></div>
+    </div>
+
+    <script>
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('fileInput');
+        const uploadPrompt = document.getElementById('upload-prompt');
+        const fileSelectedUI = document.getElementById('file-selected-ui');
+        const fileNameDisplay = document.getElementById('file-name-display');
+        const removeFileBtn = document.getElementById('removeFileBtn');
+        const uploadForm = document.getElementById('uploadForm');
+        const submitBtn = document.getElementById('submitBtn');
+        const successActions = document.getElementById('success-actions');
+        const statusArea = document.getElementById('status-area');
+        const languageSelect = document.getElementById('language');
+        
+        let selectedFile = null;
+        let generatedFileUrl = null;
+        let generatedFileName = '';
+        let isProcessing = false;
+
+        // --- Drag, Drop & Click Logic ---
+        dropZone.addEventListener('click', (e) => {
+            // Only trigger file input if we aren't processing AND a file isn't already selected
+            if (!isProcessing && !selectedFile && e.target !== removeFileBtn) {
+                fileInput.click();
+            }
+        });
+        
+        dropZone.addEventListener('dragover', (e) => { 
+            e.preventDefault(); 
+            if (!isProcessing && !selectedFile) dropZone.classList.add('dragover'); 
+        });
+        
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (isProcessing || selectedFile) return; 
+            if (e.dataTransfer.files.length > 0) handleFileSelection(e.dataTransfer.files[0]);
+        });
+        
+        fileInput.addEventListener('change', (e) => {
+            if (isProcessing) return;
+            if (e.target.files.length > 0) handleFileSelection(e.target.files[0]);
+        });
+
+        // --- File Selection & Removal ---
+        function handleFileSelection(file) {
+            if (!file.type.startsWith('video/')) {
+                showStatus('Please select a valid video file.', 'error');
+                return;
+            }
+            selectedFile = file;
+            fileNameDisplay.textContent = file.name;
+            showStatus('', '');
+            
+            // Switch UI to locked state
+            uploadPrompt.style.display = 'none';
+            fileSelectedUI.style.display = 'flex';
+            dropZone.classList.add('locked');
+        }
+
+        removeFileBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevents triggering the dropZone click
+            selectedFile = null;
+            fileInput.value = '';
+            
+            // Revert UI to empty state
+            uploadPrompt.style.display = 'block';
+            fileSelectedUI.style.display = 'none';
+            dropZone.classList.remove('locked');
+        });
+
+        function showStatus(message, type) {
+            statusArea.className = type;
+            if (type === 'loading') {
+                statusArea.innerHTML = `<div class="spinner"></div> ${message}`;
+            } else {
+                statusArea.textContent = message;
+            }
+        }
+
+        // --- Form Submission Logic ---
+        uploadForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            if (!selectedFile) {
+                showStatus('Please select a video file first.', 'error');
+                dropZone.style.borderColor = '#DC2626';
+                setTimeout(() => dropZone.style.borderColor = '#CBD5E1', 1000);
+                return;
+            }
+
+            isProcessing = true;
+            dropZone.classList.add('disabled');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Processing...';
+            languageSelect.disabled = true;
+
+            const formData = new FormData();
+            formData.append('video', selectedFile);
+            formData.append('language', languageSelect.value);
+
+            showStatus('Extracting audio & querying AI models...', 'loading');
+
+            try {
+                const response = await fetch('/api/transcribe', { method: 'POST', body: formData });
+
+               if (response.ok) {
+                    const blob = await response.blob();
+                    
+                    // PEEK INSIDE THE FILE: Read just the first 200 characters to check for our custom error tag
+                    const textPreview = await blob.slice(0, 200).text();
+                    
+                    generatedFileUrl = window.URL.createObjectURL(blob);
+                    generatedFileName = `transcript_${languageSelect.value}.srt`;
+                    
+                    submitBtn.style.display = 'none';
+                    successActions.style.display = 'flex';
+
+                    // Update UI based on what we found inside the file
+                    if (textPreview.includes('[ERROR:')) {
+                        showStatus('Warning: LLM API failed. Raw Tamil fallback generated instead.', 'warning');
+                    } else {
+                        showStatus('Success! Your subtitles are ready to download.', 'success');
+                    }
+                } else {
+                    showStatus('Server Error: Processing failed.', 'error');
+                    resetFormState();
+                }
+            } catch (error) {
+                showStatus('Network Error: Could not connect to backend.', 'error');
+                resetFormState();
+            }
+        });
+
+        function resetFormState() {
+            submitBtn.style.display = 'block';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Generate Subtitles (.srt)';
+            isProcessing = false;
+            dropZone.classList.remove('disabled');
+            languageSelect.disabled = false;
+        }
+
+        // --- Download & Reset Buttons ---
+        document.getElementById('downloadBtn').addEventListener('click', () => {
+            if (generatedFileUrl) {
+                const a = document.createElement('a');
+                a.href = generatedFileUrl;
+                a.download = generatedFileName;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            }
+        });
+
+        document.getElementById('resetBtn').addEventListener('click', () => {
+            if (generatedFileUrl) URL.revokeObjectURL(generatedFileUrl);
+            
+            // Clear everything and reset UI
+            removeFileBtn.click(); 
+            resetFormState();
+            successActions.style.display = 'none';
+            showStatus('', '');
+        });
+    </script>
+</body>
+</html>

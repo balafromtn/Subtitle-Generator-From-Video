@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+python-multipart
+torch
+transformers
+optimum
+accelerate
+audio-separator[gpu]
+google-genai
+python-dotenv
+groq

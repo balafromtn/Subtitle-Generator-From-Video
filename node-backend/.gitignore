@@ -1,0 +1,15 @@
+# Node
+node-backend/node_modules/
+node-backend/uploads/
+node-backend/npm-debug.log
+
+# Python
+python-ai-engine/venv/
+python-ai-engine/.venv/
+python-ai-engine/__pycache__/
+python-ai-engine/temp_processing/
+*.pyc
+
+# Environment Variables
+.env
+.venv
