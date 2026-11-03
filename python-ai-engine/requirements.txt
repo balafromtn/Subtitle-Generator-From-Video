@@ -1,11 +1,5 @@
-fastapi
-uvicorn
-python-multipart
-torch
-transformers
-optimum
-accelerate
-audio-separator[gpu]
-google-genai
-python-dotenv
-groq
+groq>=0.11,<1
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9
+python-dotenv>=1,<2

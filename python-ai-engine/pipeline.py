@@ -1,130 +1,547 @@
+
+"""Core video-to-subtitle processing pipeline.
+
+Workflow:
+1. Extract audio using FFmpeg.
+2. Transcribe Tamil or translate audio into English using Groq Whisper.
+3. Generate SRT subtitles.
+4. Transliterate Tamil subtitles into Tanglish using Groq GPT-OSS 120B.
+5. Preserve native Tamil subtitles as a fallback if transliteration fails.
+
+A Groq client is injected by the calling application so each user can
+supply their own API key without sharing credentials across sessions.
+"""
+
 import os
+import re
 import subprocess
-from dotenv import load_dotenv
+from pathlib import Path
+from typing import Any
+
 from groq import Groq
-import google.genai as genai
 
-load_dotenv()
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-async def process_audio_pipeline(video_path: str, language: str) -> str:
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    audio_path = f"temp_processing/{base_name}.mp3"
-    srt_path = f"temp_processing/{base_name}.srt"
+# ---------------------------------------------------------
+# MODEL CONFIGURATION
+# ---------------------------------------------------------
 
-    print("Extracting audio...")
-    abs_video_path = os.path.abspath(video_path)
-    abs_audio_path = os.path.abspath(audio_path)
+TRANSCRIPTION_MODEL = "whisper-large-v3"
+TRANSLITERATION_MODEL = "openai/gpt-oss-120b"
 
-    try:
-        subprocess.run([
-            "ffmpeg", "-i", abs_video_path, 
-            "-vn", "-q:a", "0", abs_audio_path, "-y"
-        ], check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        raise Exception("Failed to extract audio. Make sure the video has an audio track!")
+# Number of subtitle entries sent per transliteration request.
+TRANSLITERATION_BATCH_SIZE = 8
 
-    # ---------------------------------------------------------
-    # STEP 2: CLOUD TRANSCRIPTION / TRANSLATION
-    # ---------------------------------------------------------
-    if language.lower() == 'english':
-        print("Translating audio directly to English via Groq...")
-        with open(audio_path, "rb") as file:
-            # Groq's built-in translation endpoint handles English natively
-            api_response = groq_client.audio.translations.create(
-                file=(audio_path, file.read()),
-                model="whisper-large-v3",
-                response_format="verbose_json"
-            )
-    else:
-        print("Transcribing native audio via Groq...")
-        with open(audio_path, "rb") as file:
-            # Standard transcription gets the native language (Tamil)
-            api_response = groq_client.audio.transcriptions.create(
-                file=(audio_path, file.read()),
-                model="whisper-large-v3",
-                response_format="verbose_json"
-            )
+# Maximum completion tokens per batch.
+TRANSLITERATION_MAX_TOKENS = 4096
 
-    # ---------------------------------------------------------
-    # STEP 3: BUILD THE RAW SRT TEXT
-    # ---------------------------------------------------------
-    print("Formatting timestamps...")
-    raw_srt_content = ""
-    for index, segment in enumerate(api_response.segments, start=1):
-        start_time = format_timestamp(segment["start"])
-        end_time = format_timestamp(segment["end"])
-        text = segment["text"].strip()
-        
-        raw_srt_content += f"{index}\n{start_time} --> {end_time}\n{text}\n\n"
 
-    # ---------------------------------------------------------
-    # STEP 4: BATCH TRANSLITERATION (TANGLISH ONLY)
-    # ---------------------------------------------------------
-    if language.lower() == 'tanglish':
-        print("Sending full file to Gemini for Tanglish transliteration...")
-        prompt = (
-            "You are an expert at transliterating Tamil to Tanglish. "
-            "I will give you a full SRT file written in Tamil script. "
-            "You must TRANSLITERATE the entire text into Tanglish (Tamil words written using English letters). "
-            "DO NOT translate the meaning into English. DO NOT leave a single Tamil letter behind. "
-            "Use ONLY the standard English alphabet (a-z, A-Z), numbers, and punctuation.\n\n"
-            "Example conversion:\n"
-            "Input: வணக்கம், எப்படி இருக்கீங்க? இது ஒரு test.\n"
-            "Output: Vanakkam, eppadi irukkinga? Ithu oru test.\n\n"
-            "CRITICAL: You must keep the exact SRT formatting, line numbering, and timestamps intact.\n\n"
-            f"Here is the file to transliterate:\n{raw_srt_content}"
-        )
-        
-        try:
-            # We ditched Gemini! Now using Groq's Llama-3.1-70B model for transliteration
-            print("Sending text to Groq Llama 3 for Tanglish transliteration...")
-            chat_completion = groq_client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a strict subtitle formatting bot. Only output the transliterated text. Do not add conversational filler."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.1, # Keep it low so it doesn't get creative, just translates
-            )
-            
-            # Extract the text from Groq's response
-            response_text = chat_completion.choices[0].message.content
-            final_srt_content = response_text.replace("```srt", "").replace("```", "").strip()
-            
-        except Exception as e:
-            print(f"\n--- GROQ LLM CRASHED ---")
-            print(f"Error details: {e}")
-            print("------------------------\n")
-            
-            error_warning = "1\n00:00:00,000 --> 00:00:05,000\n[ERROR: GROQ TRANSLITERATION FAILED]\n\n"
-            final_srt_content = error_warning + raw_srt_content
-            
-    else:
-        final_srt_content = raw_srt_content
+# ---------------------------------------------------------
+# SRT UTILITIES
+# ---------------------------------------------------------
 
-    # ---------------------------------------------------------
-    # STEP 5: SAVE AND CLEANUP
-    # ---------------------------------------------------------
-    with open(srt_path, "w", encoding="utf-8") as srt_file:
-        srt_file.write(final_srt_content)
+def _segment_value(
+    segment: Any,
+    key: str,
+    default: Any = None,
+) -> Any:
+    """Support both dictionary and SDK model segment objects."""
 
-    os.remove(video_path)
-    os.remove(audio_path)
+    if isinstance(segment, dict):
+        return segment.get(key, default)
 
-    print("Processing complete!")
-    return srt_path
+    return getattr(segment, key, default)
+
 
 def format_timestamp(seconds: float) -> str:
-    ms = int((seconds % 1) * 1000)
-    s = int(seconds)
-    m, s = divmod(s, 60)
-    h, m = divmod(m, 60)
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    """Convert seconds into SRT timestamp format."""
+
+    total_ms = max(0, int(round(seconds * 1000)))
+
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, milliseconds = divmod(remainder, 1000)
+
+    return (
+        f"{hours:02d}:"
+        f"{minutes:02d}:"
+        f"{secs:02d},"
+        f"{milliseconds:03d}"
+    )
+
+
+def split_srt_blocks(srt_content: str) -> list[str]:
+    """Split an SRT file into individual subtitle entries."""
+
+    blocks = re.split(r"\n\s*\n", srt_content.strip())
+
+    return [
+        block.strip()
+        for block in blocks
+        if block.strip()
+    ]
+
+
+def chunk_srt(
+    srt_content: str,
+    batch_size: int = TRANSLITERATION_BATCH_SIZE,
+) -> list[str]:
+    """Split SRT entries into manageable batches."""
+
+    blocks = split_srt_blocks(srt_content)
+
+    return [
+        "\n\n".join(blocks[index:index + batch_size])
+        for index in range(0, len(blocks), batch_size)
+    ]
+
+
+def contains_tamil(text: str) -> bool:
+    """Check whether Tamil Unicode characters remain."""
+
+    return bool(re.search(r"[\u0B80-\u0BFF]", text))
+
+
+def extract_srt_timestamps(srt_content: str) -> list[str]:
+    """Extract all timestamps from an SRT file."""
+
+    return re.findall(
+        r"\d{2}:\d{2}:\d{2},\d{3}"
+        r"\s*-->\s*"
+        r"\d{2}:\d{2}:\d{2},\d{3}",
+        srt_content,
+    )
+
+
+def extract_srt_indices(srt_content: str) -> list[str]:
+    """Extract subtitle numbering."""
+
+    indices = []
+
+    for block in split_srt_blocks(srt_content):
+        lines = block.splitlines()
+
+        if lines and lines[0].strip().isdigit():
+            indices.append(lines[0].strip())
+
+    return indices
+
+
+# ---------------------------------------------------------
+# TANGlish TRANSLITERATION
+# ---------------------------------------------------------
+
+def transliterate_srt(
+    groq_client: Groq,
+    srt_content: str,
+) -> str:
+    """Transliterate Tamil SRT into Tanglish using GPT-OSS 120B."""
+
+    batches = chunk_srt(srt_content)
+
+    if not batches:
+        raise RuntimeError("No subtitle entries available for transliteration.")
+
+    translated_batches = []
+
+    print(
+        f"Starting Tanglish transliteration: "
+        f"{len(batches)} batch(es)"
+    )
+
+    for batch_number, batch in enumerate(batches, start=1):
+
+        print(
+            f"Transliterating batch "
+            f"{batch_number}/{len(batches)}..."
+        )
+        
+        prompt = f"""
+        You are an expert Tamil Movie Subtitle Editor and Tanglish Transliteration Engine.
+
+        YOUR TASK:
+        Convert the raw Tamil script from a Whisper AI transcription into natural, highly colloquial Tanglish subtitles.
+        Tanglish means everyday spoken Tamil written using the English alphabet.
+
+        CRITICAL INSTRUCTION - FIX AI MISTAKES:
+        The input text is generated by Whisper AI and contains severe phonetic mishearings, garbled words, and broken grammar. 
+        DO NOT transliterate these mistakes literally. You MUST reconstruct and auto-correct the sentences into the most logical, natural spoken Tamil phrases based on the context of the conversation.
+
+        STRICT RULES:
+        1. USE PURE SPOKEN TAMIL: Write exactly how people speak or text in real life, not formal written Tamil. (e.g., use "Epdi" not "Eppadi", "Saaptalum" not "Saappidaalum", "Sethuruven" not "Saaven", "Poren" not "Pogiren").
+        2. RECONSTRUCT GARBLED TEXT: Use context to fix Whisper's hallucinations. Make it sound like a real human conversation.
+        3. PRESERVE MEANING, NO ENGLISH TRANSLATION: Do not translate the dialogue into English. 
+        4. ENGLISH WORDS STAY ENGLISH: Keep existing English words intact (e.g., "loop", "hotel", "order", "half an hour").
+        5. KEEP SRT FORMAT INTACT: Preserve all subtitle index numbers, timestamps (00:00:00,000 --> 00:00:00,000), and blank lines exactly as provided.
+        6. NO TAMIL SCRIPT: The final output MUST NOT contain a single Tamil letter. It must be 100% English alphabet.
+        7. OUTPUT FORMAT: Return ONLY the raw SRT text. Do not add ```srt markdown blocks, headers, or explanations.
+
+        TRANSLITERATION & CORRECTION EXAMPLES (Learn how to fix Whisper's errors):
+
+        Bad Whisper Input:
+        Unse irandiyitta idli vaiku theriyala
+        Correct Tanglish Output:
+        Thambi, 12 maniku rendu idli vangi thingiriya,
+
+        Bad Whisper Input:
+        Andha mudanga kodukkum nee sellalaam naa sellaraam
+        Correct Tanglish Output:
+        Andha parotta-va sapta nee sethuruva. Indha idli-a sapta naan sethuruven.
+
+        Bad Whisper Input:
+        Nalla la parattaavai naan amaindu saappinen paar.
+        Correct Tanglish Output:
+        Nalla illadha parotta-va naan epdi sapudren nu paaru.
+
+        Bad Whisper Input:
+        Kaaththikalil nerippittoamaa!
+        Correct Tanglish Output:
+        Namba loop-la matikitoma?
+
+        SRT INPUT:
+
+        {batch}
+
+        SRT OUTPUT:
+        """
+        response = groq_client.chat.completions.create(
+            model=TRANSLITERATION_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            reasoning_effort="low",
+            include_reasoning=False,
+            temperature=0.2,
+            max_completion_tokens=TRANSLITERATION_MAX_TOKENS,
+            stream=False,
+        )
+
+        if not response.choices:
+            raise RuntimeError(
+                f"No completion choices returned for batch {batch_number}."
+            )
+
+        choice = response.choices[0]
+        message = choice.message
+
+        response_text = message.content or ""
+
+        if isinstance(response_text, list):
+            response_text = "".join(
+                item.text
+                for item in response_text
+                if getattr(item, "text", None)
+            )
+
+        response_text = response_text.strip()
+
+        # Diagnose empty responses instead of silently losing information.
+        if not response_text:
+
+            finish_reason = choice.finish_reason
+            usage = response.usage
+
+            print("\n========== GROQ DEBUG ==========")
+            print("Model:", TRANSLITERATION_MODEL)
+            print("Batch:", batch_number)
+            print("Finish reason:", finish_reason)
+            print("Usage:", usage)
+            print("Reasoning available:", bool(
+                getattr(message, "reasoning", None)
+            ))
+            print("Refusal:", getattr(message, "refusal", None))
+            print("================================\n")
+
+            raise RuntimeError(
+                f"Empty response in batch {batch_number}. "
+                f"Finish reason: {finish_reason}. "
+                "Check Groq response diagnostics."
+            )
+
+        # Remove accidental Markdown fences.
+        response_text = re.sub(
+            r"^\s*```(?:srt)?\s*",
+            "",
+            response_text,
+            flags=re.IGNORECASE,
+        )
+
+        response_text = re.sub(
+            r"\s*```\s*$",
+            "",
+            response_text,
+        ).strip()
+
+        # Validate timestamps.
+        original_timestamps = extract_srt_timestamps(batch)
+        output_timestamps = extract_srt_timestamps(response_text)
+
+        if original_timestamps != output_timestamps:
+            raise RuntimeError(
+                f"Timestamp mismatch in batch {batch_number}. "
+                "The model modified the subtitle timestamps."
+            )
+
+        # Validate subtitle numbering.
+        original_indices = extract_srt_indices(batch)
+        output_indices = extract_srt_indices(response_text)
+
+        if original_indices != output_indices:
+            raise RuntimeError(
+                f"Subtitle numbering mismatch in batch {batch_number}."
+            )
+
+        # Reject incomplete transliteration.
+        if contains_tamil(response_text):
+            raise RuntimeError(
+                f"Tamil-script characters remain in batch {batch_number}."
+            )
+
+        translated_batches.append(response_text)
+
+        print(f"Batch {batch_number} completed successfully.")
+
+    final_output = "\n\n".join(translated_batches).strip()
+
+    if not final_output:
+        raise RuntimeError("The transliteration process produced no output.")
+
+    print("Tanglish transliteration completed successfully.")
+
+    return final_output
+
+
+# ---------------------------------------------------------
+# MAIN AUDIO PROCESSING PIPELINE
+# ---------------------------------------------------------
+
+async def process_audio_pipeline(
+    video_path: str,
+    language: str,
+    groq_client: Groq | None = None,
+) -> str:
+    """Generate an SRT subtitle file and return its path."""
+
+    language = language.lower().strip()
+
+    if language not in {"english", "tanglish"}:
+        raise ValueError(
+            "Unsupported subtitle language. "
+            "Choose English or Tanglish."
+        )
+
+    # Initialize Groq client if one was not injected.
+    if groq_client is None:
+
+        api_key = os.getenv("GROQ_API_KEY")
+
+        if not api_key:
+            raise ValueError(
+                "A Groq API key is required. "
+                "Enter your key in the application."
+            )
+
+        groq_client = Groq(api_key=api_key)
+
+    video = Path(video_path).resolve()
+
+    if not video.is_file():
+        raise FileNotFoundError(
+            "The uploaded video could not be found."
+        )
+
+    audio_path = video.with_suffix(".mp3")
+    srt_path = video.with_suffix(".srt")
+
+    try:
+
+        # -------------------------------------------------
+        # STEP 1: AUDIO EXTRACTION
+        # -------------------------------------------------
+
+        print("Extracting audio...")
+
+        try:
+
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-i", str(video),
+                    "-vn",
+                    "-q:a", "0",
+                    "-y",
+                    str(audio_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        except FileNotFoundError as exc:
+
+            raise RuntimeError(
+                "FFmpeg is missing on this host. "
+                "Install FFmpeg and make sure it is available on PATH."
+            ) from exc
+
+        except subprocess.CalledProcessError as exc:
+
+            detail = (exc.stderr or "").strip()
+
+            if (
+                "does not contain any stream" in detail.lower()
+                or "audio" in detail.lower()
+            ):
+
+                raise RuntimeError(
+                    "Failed to extract audio. "
+                    "Make sure the video contains an audio track."
+                ) from exc
+
+            raise RuntimeError(
+                "FFmpeg could not process this video. "
+                "Check that the file is valid and supported."
+            ) from exc
+
+        if not audio_path.is_file() or audio_path.stat().st_size == 0:
+            raise RuntimeError(
+                "Audio extraction produced an empty audio file."
+            )
+
+        # -------------------------------------------------
+        # STEP 2: WHISPER TRANSCRIPTION / TRANSLATION
+        # -------------------------------------------------
+
+        if language == "english":
+            print("Translating audio to English...")
+        else:
+            print("Transcribing native audio...")
+
+        with audio_path.open("rb") as audio_file:
+            audio_payload = audio_file.read()
+
+        if language == "english":
+
+            api_response = groq_client.audio.translations.create(
+                file=(audio_path.name, audio_payload),
+                model=TRANSCRIPTION_MODEL,
+                response_format="verbose_json",
+            )
+
+        else:
+
+            api_response = groq_client.audio.transcriptions.create(
+                file=(audio_path.name, audio_payload),
+                model=TRANSCRIPTION_MODEL,
+                response_format="verbose_json",
+            )
+
+        # -------------------------------------------------
+        # STEP 3: SRT GENERATION
+        # -------------------------------------------------
+
+        print("Formatting timestamps...")
+
+        raw_srt_parts: list[str] = []
+
+        for index, segment in enumerate(
+            api_response.segments or [],
+            start=1,
+        ):
+
+            start = _segment_value(segment, "start")
+            end = _segment_value(segment, "end")
+
+            text = str(
+                _segment_value(segment, "text", "")
+            ).strip()
+
+            if start is None or end is None or not text:
+                continue
+
+            raw_srt_parts.append(
+                f"{index}\n"
+                f"{format_timestamp(float(start))} --> "
+                f"{format_timestamp(float(end))}\n"
+                f"{text}"
+            )
+
+        raw_srt_content = "\n\n".join(raw_srt_parts).strip()
+
+        if not raw_srt_content:
+
+            raise RuntimeError(
+                "The transcription service returned no subtitle segments. "
+                "Try another video."
+            )
+
+        # Optional diagnostic: inspect Whisper's original transcription.
+        print("\n========== WHISPER TRANSCRIPTION ==========")
+        print(raw_srt_content)
+        print("===========================================\n")
+
+        # -------------------------------------------------
+        # STEP 4: TANGlish TRANSLITERATION
+        # -------------------------------------------------
+
+        if language == "tanglish":
+
+            print(
+                "Sending text to Groq GPT-OSS 120B "
+                "for Tanglish transliteration..."
+            )
+
+            try:
+
+                final_srt_content = transliterate_srt(
+                    groq_client=groq_client,
+                    srt_content=raw_srt_content,
+                )
+
+            except Exception as exc:
+
+                # Preserve original Tamil transcription.
+                print(
+                    "Groq transliteration failed; "
+                    f"returning native-script fallback: {exc}"
+                )
+
+                final_srt_content = raw_srt_content
+
+        else:
+
+            final_srt_content = raw_srt_content
+
+        # -------------------------------------------------
+        # STEP 5: SAVE FINAL SRT
+        # -------------------------------------------------
+
+        srt_path.write_text(
+            final_srt_content + "\n",
+            encoding="utf-8",
+        )
+
+        print("Processing complete!")
+
+        return str(srt_path)
+
+    finally:
+
+        # -------------------------------------------------
+        # STEP 6: TEMPORARY FILE CLEANUP
+        # -------------------------------------------------
+
+        for temporary_path in (video, audio_path):
+
+            try:
+
+                temporary_path.unlink(missing_ok=True)
+
+            except OSError as cleanup_error:
+
+                print(
+                    f"Could not remove temporary file "
+                    f"{temporary_path.name}: {cleanup_error}"
+                )

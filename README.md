@@ -1,100 +1,108 @@
-# AI Video Transcriber (English & Tanglish)
+# VDO → SRT — AI Tamil Subtitle Generator
 
-A production-ready, dual-stack AI application that processes video files, extracts audio locally via FFmpeg, and uses advanced cloud LLMs to generate highly accurate `.srt` subtitles in either English or Romanized Tanglish.
+A Streamlit application that turns Tamil videos into **English subtitles** or **Romanized Tanglish subtitles**. It uses FFmpeg for audio extraction, Groq Whisper for transcription/translation, and Groq Llama 3.3 for Tanglish transliteration.
 
-## ✨ Features
-* **Dual-Language Output:** Instantly translates Tamil video to English subtitles, or Romanizes Tamil script into Tanglish (English alphabet).
-* **Modern UI/UX:** Features a sleek drag-and-drop interface, UI state locking during processing, and a graceful error-handling frontend.
-* **100% Free AI Pipeline:** Utilizes Groq's generous free tier for both audio transcription (Whisper) and text reasoning (Llama 3.3), completely bypassing standard API rate limits.
-* **Cloud-Accelerated:** Offloads heavy AI models to LPUs in the cloud, allowing the app to run instantly on any low-end local machine.
+## Features
 
-## 🏗️ Architecture
-- **Frontend:** HTML, CSS, Vanilla JS (served via public static folder)
-- **API Gateway:** Node.js + Express + Multer
-- **AI Engine:** Python + FastAPI
-- **Media Processing:** FFmpeg (Local CLI)
-- **Transcription / Translation:** Groq API (`whisper-large-v3`)
-- **Tanglish Transliteration:** Groq API (`llama-3.3-70b-versatile`)
+- Upload MP4, WEBM and MKV videos.
+- Generate English subtitles from Tamil speech.
+- Generate Tanglish subtitles (Tamil words written with English letters).
+- Validate a user-provided Groq API key before processing.
+- Revalidate the key immediately before a job starts.
+- Show useful errors for invalid credentials, rate limits, connection problems and processing failures.
+- Preview and download the generated `.srt` file.
+- Keep credentials in the user's Streamlit session; no key is committed to the repository.
+- Clean up uploaded video and extracted audio files after processing.
 
-## 📋 Prerequisites
-1. **Node.js** installed (v18+)
-2. **Python 3** installed (v3.10+)
-3. **FFmpeg** installed and added to your system PATH (or `ffmpeg.exe` placed in the python directory)
-4. A free API Key from [Groq Cloud](https://console.groq.com).
-
----
-
-## 🚀 Setup Instructions
-
-### 1. The Python AI Engine
-Navigate to the Python directory and set up the virtual environment:
-
-**Windows:**
-```bash
-cd python-ai-engine
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-```
-
-**Mac/Linux:**
-
-```bash
-cd python-ai-engine
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-```
-
-Create a `.env` file in the `python-ai-engine` folder and add your Groq key:
+## Architecture
 
 ```text
-GROQ_API_KEY=gsk_your_groq_api_key_here
-
+Streamlit UI (app.py)
+  ├── User enters Groq API key
+  ├── Authenticated key validation (Groq models.list)
+  ├── Video upload / language selection / SRT preview & download
+  └── Existing Python AI pipeline (python-ai-engine/pipeline.py)
+        ├── FFmpeg audio extraction
+        ├── Groq Whisper (whisper-large-v3)
+        └── Groq Llama 3.3 (Tanglish only)
 ```
 
-Start the Python microservice:
+The original Node.js gateway is no longer required for the Streamlit deployment. The FastAPI service in `python-ai-engine/main.py` is retained as an optional standalone API for deployments that want to run the AI engine separately. The AI processing flow and model choices are preserved; the pipeline now receives a per-session Groq client instead of initializing cloud clients at import time.
+
+## Run locally
+
+### 1. Requirements
+
+- Python 3.10+
+- FFmpeg installed and available on `PATH`
+- A Groq API key from [Groq Console](https://console.groq.com/keys)
+
+### 2. Install dependencies
 
 ```bash
-python -m uvicorn main:app --reload --port 8000
-
+python -m venv .venv
 ```
 
-### 2. The Node.js Gateway
+Windows PowerShell:
 
-In a **new terminal window**, navigate to the Node directory and install dependencies:
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+macOS / Linux:
 
 ```bash
-cd node-backend
-npm install express multer axios form-data
-
+source .venv/bin/activate
 ```
 
-Start the web server:
+Then:
 
 ```bash
-node server.js
-
+pip install -r requirements.txt
 ```
 
----
+### 3. Start Streamlit
 
-## 💻 Usage
+```bash
+streamlit run app.py
+```
 
-1. Open `http://localhost:3000` in your web browser.
-2. Drag and drop a video file (`.mp4`, `.webm`, `.mkv`) into the upload zone.
-3. Select your desired subtitle language output.
-4. Click **Generate Subtitles** and wait for the file to process.
-5. Click **Download Subtitles (.srt)** once processing is complete. If the AI transliteration fails, the UI will warn you and provide a fallback native-script file.
+Open the local URL printed by Streamlit. Enter your own Groq API key in the UI, validate it, upload a video, choose Tanglish or English, and generate the SRT file.
 
-## 🤝 Contributing
-I am always looking to learn and improve, so contributions are incredibly welcome! If you have ideas for new features, found a bug, or just want to make the code cleaner, I would be absolutely thrilled to see your input. 
+## Optional FastAPI service
 
-Feel free to fork the repository, make your changes, and submit a Pull Request. Let's make this project even better together!
+The FastAPI service remains available if you want a separate frontend or worker deployment:
 
-## ⭐️ Show Your Support
-If this project was useful to you, saved you some time, or if you just found the code interesting, I would be incredibly grateful if you could give it a **Star** ⭐️ on GitHub. 
+```bash
+cd python-ai-engine
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
 
-It is a small gesture, but it truly means a lot to me and helps other developers discover the tool. Thank you for your support!
+`POST /process-video` accepts multipart fields `video` and `language` (`english` or `tanglish`) and requires the `X-Groq-API-Key` request header. `GET /health` provides a basic health check.
+
+## Security and privacy
+
+- The UI does not persist the Groq key to disk or source control.
+- The key is held in Streamlit's per-user session state and passed server-side to the Groq client.
+- Do not paste API keys into issue trackers, screenshots or public logs.
+- Uploaded videos and extracted audio are temporary and are cleaned up after processing. Generated subtitle text is held for the current interaction so it can be downloaded.
+- Use HTTPS in production.
+
+## Troubleshooting
+
+| Message / symptom | What to check |
+|---|---|
+| Groq rejected the key | Create a new key in Groq Console and validate again. |
+| Rate limit reached | Wait for the relevant Groq limit to reset, then retry. |
+| Cannot connect to Groq | Check outbound network access and Groq service availability. |
+| FFmpeg missing | Install FFmpeg and ensure `ffmpeg` is on `PATH`. |
+| Failed to extract audio | Confirm the video is valid and contains an audio track. |
+| No subtitle segments | Try a video with clearer speech or a supported audio track. |
+| Tanglish fallback shown | Whisper succeeded, but the Llama transliteration call failed; the original Tamil SRT is retained as fallback. |
+
+## Models used
+
+- Transcription / English translation: `whisper-large-v3`
+- Tanglish transliteration: `openai/gpt-oss-120b`
+
+A single Groq API key and a per-session Groq client are reused for both models.

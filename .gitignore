@@ -1,19 +1,22 @@
-# Node
-node_modules/
-node-backend/node_modules/
-node-backend/uploads/
-node-backend/npm-debug.log
-
 # Python
-venv/
-.venv/
-python-ai-engine/venv/
-python-ai-engine/.venv/
-python-ai-engine/temp_processing/
-
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
 
-# Environment Variables
+# Secrets and local environment
 .env
-*.env
+.streamlit/secrets.toml
+
+# Temporary processing files
+temp_processing/
+temp_processing/**
+uploads/
+*.mp3
+*.srt
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
